@@ -1,0 +1,52 @@
+name: Sync Subaru Crosstrek with stable openpilot
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-subaru-crosstrek
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository == 'jgerega107/opendbc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out automation from master
+        uses: actions/checkout@v4
+        with:
+          path: automation-source
+          ref: master
+          persist-credentials: false
+
+      - name: Check out maintained branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: target
+          ref: subaru-crosstrek
+
+      - name: Prepare stable release update
+        id: prepare
+        run: python3 automation-source/automation/sync_subaru.py target >> "$GITHUB_OUTPUT"
+
+      - name: Run opendbc test suite
+        if: steps.prepare.outputs.changed == 'true'
+        working-directory: target
+        run: ./test.sh
+
+      - name: Publish verified update
+        if: steps.prepare.outputs.changed == 'true'
+        working-directory: target
+        run: |
+          git push \
+            --force-with-lease=refs/heads/subaru-crosstrek:${{ steps.prepare.outputs.old_sha }} \
+            origin HEAD:refs/heads/subaru-crosstrek
