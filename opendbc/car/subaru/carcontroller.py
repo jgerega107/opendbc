@@ -44,15 +44,18 @@ class CarController(CarControllerBase):
     # *** steering ***
     if (self.frame % self.p.STEER_STEP) == 0:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+        # Yield angle control while the driver is steering so the command tracks
+        # the measured angle before control resumes or disengages.
+        lat_active = CC.latActive and not CS.out.steeringPressed
         apply_angle = actuators.steeringAngleDeg
         # heavy steering oscillation at low speeds (up to ~5 mph), still present up to ~22mph
         # likely due to poor steering angle sensor resolution or imprecise EPS actuation
-        if CC.latActive and CS.out.vEgoRaw < 10.0:
+        if lat_active and CS.out.vEgoRaw < 10.0:
           deadzone = np.interp(CS.out.vEgoRaw, [2., 10.0], [6.0, 3.0])
           apply_angle = self.apply_angle_last + apply_center_deadzone(apply_angle - self.apply_angle_last, deadzone)
         self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
-                                                            CS.out.steeringAngleDeg, CC.latActive, CarControllerParams, self.VM)
-        can_sends.append(subarucan.create_steering_control_angle(self.packer, self.apply_angle_last, CC.latActive))
+                                                            CS.out.steeringAngleDeg, lat_active, CarControllerParams, self.VM)
+        can_sends.append(subarucan.create_steering_control_angle(self.packer, self.apply_angle_last, lat_active))
       else:
         apply_torque = int(round(actuators.torque * self.p.STEER_MAX))
 

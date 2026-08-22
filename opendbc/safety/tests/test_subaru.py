@@ -5,8 +5,11 @@ import numpy as np
 
 from functools import partial
 
+from opendbc.car import structs
+from opendbc.car.can_definitions import CanData
 from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
-from opendbc.car.subaru.values import CarControllerParams, SubaruSafetyFlags
+from opendbc.car.subaru.interface import CarInterface
+from opendbc.car.subaru.values import CAR, CarControllerParams, SubaruSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.safety.tests.libsafety import libsafety_py
@@ -294,6 +297,86 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
   RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
                                                SubaruMsg.ES_Infotainment)}
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
+
+  @staticmethod
+  def _decode_angle_cmd(dat):
+    raw_angle = int.from_bytes(dat[5:8], byteorder="little") & 0x1FFFF
+    if raw_angle & 0x10000:
+      raw_angle -= 0x20000
+    return -raw_angle / 100, bool(dat[1] & 0x10)
+
+  def test_crosstrek_controller_driver_override(self):
+    self._reset_angle_safety()
+    self._reset_speed_measurement(15)
+    self._reset_angle_measurement(0)
+
+    CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
+    CI = CarInterface(CP)
+    CI.update([])
+    carstate_packer = CANPackerSafety("subaru_global_2017_generated")
+
+    def update_carstate(steering_torque, steering_angle, frame):
+      can_sends = [
+        CanData(*carstate_packer.make_can_msg("Steering_Torque", SUBARU_MAIN_BUS,
+                                              {"Steer_Torque_Sensor": steering_torque})),
+        CanData(*carstate_packer.make_can_msg("Steering_2", SUBARU_MAIN_BUS,
+                                              {"Steering_Angle": steering_angle})),
+      ]
+      return CI.update([(frame * 10_000_000, can_sends)])
+
+    # The global Subaru driver-torque threshold is strict: exactly +/-80 does
+    # not count as an override, while the next representable value does.
+    for frame, (steering_torque, steering_pressed) in enumerate(((0, False), (80, False), (-80, False),
+                                                                 (81, True), (-81, True))):
+      CS = update_carstate(steering_torque, 0, frame)
+      self.assertEqual(CS.steeringPressed, steering_pressed)
+
+    # Exercise normal control, a driver override, resumption after the driver
+    # releases the wheel, another override, and finally a full disengagement.
+    sequence = [(True, 0, 0)] * 2
+    sequence += [(True, 80, 0)] * 2
+    sequence += [(True, -80, 0)] * 2
+    sequence += [(True, 81, 5)] * 2
+    sequence += [(True, 81, 10)] * 2
+    sequence += [(True, 81, 15)] * 2
+    sequence += [(True, 0, 15)] * 4
+    sequence += [(True, -81, 18)] * 2
+    sequence += [(True, -81, 20)] * 2
+    sequence += [(False, -81, 20)] * 2
+    sequence += [(False, 0, 20)] * 2
+
+    angle_msgs = 0
+    for frame, (lat_active, steering_torque, steering_angle) in enumerate(sequence):
+      self.assertTrue(self._rx(self._angle_meas_msg(steering_angle)))
+
+      CS = update_carstate(steering_torque, steering_angle, frame + 5)
+      steering_pressed = abs(steering_torque) > 80
+      self.assertEqual(CS.steeringPressed, steering_pressed)
+      self.assertAlmostEqual(CS.steeringAngleDeg, steering_angle, places=2)
+
+      CI.CS.out.vEgoRaw = 15
+
+      CC = structs.CarControl()
+      CC.latActive = lat_active
+      CC.actuators.steeringAngleDeg = 20
+
+      self.safety.set_controls_allowed(lat_active)
+      self.safety.set_timer(frame * 10_000)
+      _, can_sends = CI.apply(CC.as_reader(), frame * 10_000_000)
+
+      for addr, dat, bus in can_sends:
+        if addr == SubaruMsg.ES_LKAS_ANGLE:
+          angle_msgs += 1
+          apply_angle, lkas_request = self._decode_angle_cmd(dat)
+          expected_request = lat_active and not steering_pressed
+          self.assertEqual(lkas_request, expected_request)
+          if not expected_request:
+            self.assertAlmostEqual(apply_angle, steering_angle, places=2)
+
+          packet = libsafety_py.make_CANPacket(addr, bus, dat)
+          self.assertTrue(self._tx(packet), f"rejected driver override angle TX at {frame=} {steering_angle=}")
+
+    self.assertEqual(angle_msgs, (len(sequence) + 1) // 2)
 
 if __name__ == "__main__":
   unittest.main()
