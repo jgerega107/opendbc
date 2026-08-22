@@ -5,12 +5,13 @@ import numpy as np
 
 from functools import partial
 
-from opendbc.car.subaru.values import SubaruSafetyFlags
+from opendbc.car.lateral import get_max_angle_delta_vm, get_max_angle_vm
+from opendbc.car.subaru.values import CarControllerParams, SubaruSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.car.vehicle_model import VehicleModel
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
-from opendbc.safety.tests.common import CANPackerSafety, round_speed, away_round
+from opendbc.safety.tests.common import CANPackerSafety, MAX_WRONG_COUNTERS, round_speed, away_round
 
 
 class SubaruMsg(enum.IntEnum):
@@ -184,17 +185,47 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
     # VM-based limits are tested below
     pass
 
-  def _find_max_allowed_angle_can(self, sign):
-    """Binary search for the exact max angle CAN value the safety allows."""
-    lo, hi = 0, self.STEER_ANGLE_MAX * self.DEG_TO_CAN + 10
-    while lo < hi:
-      mid = (lo + hi + 1) // 2
-      self.safety.set_desired_angle_last(mid * sign)
-      if self._tx(self._angle_cmd_msg(mid / self.DEG_TO_CAN * sign, True)):
-        lo = mid
-      else:
-        hi = mid - 1
-    return lo
+  def _reset_angle_safety(self):
+    self.__class__.cnt_angle_cmd = 0
+    self.safety.set_safety_hooks(CarParams.SafetyModel.subaru, self.FLAGS)
+    self.safety.init_tests()
+
+  def _rx_check_msgs(self):
+    return {
+      "Throttle": self._user_gas_msg(0),
+      "Steering_Torque": self._torque_driver_msg(0),
+      "Wheel_Speeds": self._speed_msg(0),
+      "Brake_Status": self._user_brake_msg(False),
+      "ES_Status": self._pcm_status_msg(False),
+      "Steering_2": self._angle_meas_msg(0),
+    }
+
+  def test_rx_checksums(self):
+    for name in self._rx_check_msgs():
+      with self.subTest(name=name):
+        self._reset_angle_safety()
+        msg = self._rx_check_msgs()[name]
+        self.assertTrue(self._rx(msg))
+
+        msg = self._rx_check_msgs()[name]
+        msg[0].data[0] ^= 0xFF
+        self.safety.set_controls_allowed(True)
+        self.assertFalse(self._rx(msg))
+        self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_rx_counters(self):
+    for name in self._rx_check_msgs():
+      with self.subTest(name=name):
+        self._reset_angle_safety()
+        msg = self._rx_check_msgs()[name]
+        self.assertTrue(self._rx(msg))
+
+        # A stuck counter must eventually invalidate RX and disengage controls.
+        for _ in range(MAX_WRONG_COUNTERS + 1):
+          self.safety.set_controls_allowed(True)
+          ret = self._rx(msg)
+        self.assertFalse(ret)
+        self.assertFalse(self.safety.get_controls_allowed())
 
   def test_lateral_accel_limit(self):
     for speed in np.linspace(0, 40, 100):
@@ -206,29 +237,22 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
         self._reset_speed_measurement(speed + 1)
         self._tx(self._angle_cmd_msg(0, True))
 
-        max_angle_can = self._find_max_allowed_angle_can(sign)
+        # Use the exact quantized wheel speed received by safety, including its
+        # one m/s model tolerance, as the input to the independent Python VM.
+        safety_speed = max(self.safety.get_vehicle_speed_min() - 1, 1)
+        # Match the C safety calculation: convert the independent Python VM result
+        # to 0.01 degree CAN units and include safety's one-unit tolerance.
+        max_angle_can = int(get_max_angle_vm(safety_speed, self.VM, CarControllerParams) * self.DEG_TO_CAN) + 1
+        apply_angle_can = min(max_angle_can, self.STEER_ANGLE_MAX * self.DEG_TO_CAN)
 
-        self.safety.set_desired_angle_last(max_angle_can * sign)
-        self.assertTrue(self._tx(self._angle_cmd_msg(max_angle_can / self.DEG_TO_CAN * sign, True)))
+        self.safety.set_desired_angle_last(apply_angle_can * sign)
+        self.assertTrue(self._tx(self._angle_cmd_msg(apply_angle_can / self.DEG_TO_CAN * sign, True)))
 
-        above_limit_can = max_angle_can + 1
+        above_limit_can = min(max_angle_can + 1, self.STEER_ANGLE_MAX * self.DEG_TO_CAN)
         self.safety.set_desired_angle_last(above_limit_can * sign)
-        self._tx(self._angle_cmd_msg(above_limit_can / self.DEG_TO_CAN * sign, True))
 
         should_tx = max_angle_can >= self.STEER_ANGLE_MAX * self.DEG_TO_CAN
         self.assertEqual(should_tx, self._tx(self._angle_cmd_msg(above_limit_can / self.DEG_TO_CAN * sign, True)))
-
-  def _find_max_allowed_delta_can(self, sign):
-    """Binary search for the exact max angle delta CAN value the safety allows from angle 0."""
-    lo, hi = 0, self.STEER_ANGLE_MAX * self.DEG_TO_CAN
-    while lo < hi:
-      mid = (lo + hi + 1) // 2
-      self.safety.set_desired_angle_last(0)
-      if self._tx(self._angle_cmd_msg(mid / self.DEG_TO_CAN * sign, True)):
-        lo = mid
-      else:
-        hi = mid - 1
-    return lo
 
   def test_lateral_jerk_limit(self):
     for speed in np.linspace(0, 40, 100):
@@ -239,7 +263,8 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
         self._reset_speed_measurement(speed + 1)
         self._tx(self._angle_cmd_msg(0, True))
 
-        max_delta_can = self._find_max_allowed_delta_can(sign)
+        safety_speed = max(self.safety.get_vehicle_speed_min() - 1, 1)
+        max_delta_can = int(get_max_angle_delta_vm(safety_speed, self.VM, CarControllerParams) * self.DEG_TO_CAN) + 1
 
         self.safety.set_desired_angle_last(0)
         self.assertTrue(self._tx(self._angle_cmd_msg(max_delta_can / self.DEG_TO_CAN * sign, True)))
@@ -269,7 +294,6 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
   RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS_ANGLE, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
                                                SubaruMsg.ES_Infotainment)}
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr(SubaruMsg.ES_LKAS_ANGLE)
-
 
 if __name__ == "__main__":
   unittest.main()
