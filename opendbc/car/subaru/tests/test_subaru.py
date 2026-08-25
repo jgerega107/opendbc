@@ -18,18 +18,27 @@ class TestSubaruFingerprint(unittest.TestCase):
 
 class TestSubaruCrosstrek2025(unittest.TestCase):
   @staticmethod
-  def _controller_angle(speed, target_angle, lat_active=True, steering_angle=0):
+  def _new_controller():
     CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
     CI = CarInterface(CP)
     CI.update([])
+    return CI
+
+  @staticmethod
+  def _apply_controller_angle(CI, speed, target_angle, lat_active=True, steering_angle=0, steering_pressed=False):
     CI.CS.out.vEgoRaw = speed
     CI.CS.out.steeringAngleDeg = steering_angle
+    CI.CS.out.steeringPressed = steering_pressed
 
     CC = structs.CarControl()
     CC.latActive = lat_active
     CC.actuators.steeringAngleDeg = target_angle
     actuators, _ = CI.apply(CC.as_reader(), 0)
     return actuators.steeringAngleDeg
+
+  @classmethod
+  def _controller_angle(cls, speed, target_angle, lat_active=True, steering_angle=0, steering_pressed=False):
+    return cls._apply_controller_angle(cls._new_controller(), speed, target_angle, lat_active, steering_angle, steering_pressed)
 
   def test_interface_configuration(self):
     CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
@@ -44,15 +53,43 @@ class TestSubaruCrosstrek2025(unittest.TestCase):
     self.assertAlmostEqual(CP.wheelbase, 2.67, places=6)
     self.assertAlmostEqual(CP.steerRatio, 17, places=6)
 
-  def test_low_speed_angle_deadzone(self):
-    # Below 2 m/s np.interp clamps the deadzone to 6 degrees.
-    self.assertAlmostEqual(self._controller_angle(0, 5.99), 0)
-    self.assertAlmostEqual(self._controller_angle(2, 6.01), 5, places=6)
+  def test_low_speed_angle_filter_is_continuous(self):
+    # The old deadzone jumped from 0 to 5 degrees when this target crossed 6 degrees.
+    below_old_deadzone = self._controller_angle(2, 5.99)
+    above_old_deadzone = self._controller_angle(2, 6.01)
+    self.assertGreater(below_old_deadzone, 0)
+    self.assertLess(above_old_deadzone, 1)
+    self.assertLess(above_old_deadzone - below_old_deadzone, 0.01)
 
-    # The deadzone linearly decreases to 3 degrees just below 10 m/s.
-    self.assertAlmostEqual(self._controller_angle(9, 3.37), 0)
-    self.assertGreater(self._controller_angle(9, 3.38), 0)
+  def test_low_speed_angle_filter_fades_with_speed(self):
+    low_speed_angle = self._controller_angle(2, 1)
+    medium_speed_angle = self._controller_angle(9, 1)
 
-    # It is disabled at 10 m/s, and inactive control follows measured angle.
+    self.assertGreater(medium_speed_angle, low_speed_angle)
+    self.assertLess(medium_speed_angle, 1)
+    # Filtering is disabled at 10 m/s.
     self.assertAlmostEqual(self._controller_angle(10, 1), 1, places=6)
+
+  def test_low_speed_angle_filter_converges(self):
+    CI = self._new_controller()
+    outputs = [self._apply_controller_angle(CI, 2, 5) for _ in range(40)]
+
+    self.assertTrue(all(outputs[i] >= outputs[i - 1] for i in range(1, len(outputs))))
+    self.assertGreater(outputs[-1], 4)
+    self.assertLess(outputs[-1], 5)
+
+  def test_angle_filter_resets_on_driver_override(self):
+    CI = self._new_controller()
+    self._apply_controller_angle(CI, 2, 50)
+    self._apply_controller_angle(CI, 2, 50)
+
+    # The steering command is updated every other control frame.
+    override_angle = self._apply_controller_angle(CI, 2, 50, steering_angle=37, steering_pressed=True)
+    self._apply_controller_angle(CI, 2, 37, steering_angle=37)
+    resumed_angle = self._apply_controller_angle(CI, 2, 37, steering_angle=37)
+
+    self.assertAlmostEqual(override_angle, 37, places=6)
+    self.assertAlmostEqual(resumed_angle, 37, places=6)
+
+  def test_inactive_angle_control_follows_measured_angle(self):
     self.assertAlmostEqual(self._controller_angle(5, 190, lat_active=False, steering_angle=37), 37, places=6)

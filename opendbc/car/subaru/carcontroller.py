@@ -1,7 +1,8 @@
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg
-from opendbc.car.lateral import apply_center_deadzone, apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg
+from opendbc.car.common.filter_simple import FirstOrderFilter
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
@@ -11,6 +12,11 @@ from opendbc.car.vehicle_model import VehicleModel
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
+
+# Smooth angle requests where the EPS is sensitive to low-speed command jitter.
+# The time constant fades to zero so normal tracking is restored at 10 m/s.
+ANGLE_FILTER_SPEED_BP = [2.0, 10.0]
+ANGLE_FILTER_RC_V = [0.2, 0.0]
 
 
 def get_safety_CP():
@@ -33,6 +39,7 @@ class CarController(CarControllerBase):
 
     if CP.flags & SubaruFlags.LKAS_ANGLE:
       self.VM = VehicleModel(get_safety_CP())
+      self.angle_filter = FirstOrderFilter(0.0, ANGLE_FILTER_RC_V[0], DT_CTRL * self.p.STEER_STEP)
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -48,11 +55,15 @@ class CarController(CarControllerBase):
         # the measured angle before control resumes or disengages.
         lat_active = CC.latActive and not CS.out.steeringPressed
         apply_angle = actuators.steeringAngleDeg
-        # heavy steering oscillation at low speeds (up to ~5 mph), still present up to ~22mph
-        # likely due to poor steering angle sensor resolution or imprecise EPS actuation
-        if lat_active and CS.out.vEgoRaw < 10.0:
-          deadzone = np.interp(CS.out.vEgoRaw, [2., 10.0], [6.0, 3.0])
-          apply_angle = self.apply_angle_last + apply_center_deadzone(apply_angle - self.apply_angle_last, deadzone)
+        if lat_active:
+          filter_rc = float(np.interp(CS.out.vEgoRaw, ANGLE_FILTER_SPEED_BP, ANGLE_FILTER_RC_V))
+          self.angle_filter.update_alpha(filter_rc)
+          apply_angle = self.angle_filter.update(apply_angle)
+        else:
+          # Avoid a stale filtered target when control resumes after an
+          # ordinary disengagement or a driver steering override.
+          self.angle_filter.x = CS.out.steeringAngleDeg
+
         self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
                                                             CS.out.steeringAngleDeg, lat_active, CarControllerParams, self.VM)
         can_sends.append(subarucan.create_steering_control_angle(self.packer, self.apply_angle_last, lat_active))
