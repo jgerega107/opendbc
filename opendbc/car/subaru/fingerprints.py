@@ -263,8 +263,12 @@ FW_VERSIONS = {
       b'\x1b!\x08\x00D\x11!\x08\x01;',
     ],
     (Ecu.engine, 0x7a2, None): [
+      b'\x04"bp\x07',
       b'\x04"cP\x07',
       b'\xe8!cp\x07',
+    ],
+    (Ecu.transmission, 0x7a3, None): [
+      b'A\x125cp',
     ],
   },
   CAR.SUBARU_FORESTER: {
