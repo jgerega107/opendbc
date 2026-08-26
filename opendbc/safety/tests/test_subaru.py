@@ -315,42 +315,81 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
     CI.update([])
     carstate_packer = CANPackerSafety("subaru_global_2017_generated")
 
-    def update_carstate(steering_torque, steering_angle, frame):
+    # The global Subaru driver-torque threshold is strict: exactly +/-80 does
+    # not count as an override, while the next representable value does.
+    # CarStateBase.update_steering_pressed filters brief spikes around the
+    # threshold, so the flag only flips after several consistent frames.
+    STEER_THRESHOLD = 80
+    MIN_COUNT = 5
+    DEBOUNCE_COUNT = MIN_COUNT + 1
+    pressed_count = 0
+
+    def track_expected_pressed(steering_torque):
+      nonlocal pressed_count
+      pressed_count += 1 if abs(steering_torque) > STEER_THRESHOLD else -1
+      pressed_count = max(0, min(pressed_count, MIN_COUNT * 2 + 1))
+      return pressed_count > MIN_COUNT
+
+    frame = 0
+
+    def update_carstate(steering_torque, steering_angle):
+      nonlocal frame
       can_sends = [
         CanData(*carstate_packer.make_can_msg("Steering_Torque", SUBARU_MAIN_BUS,
                                               {"Steer_Torque_Sensor": steering_torque})),
         CanData(*carstate_packer.make_can_msg("Steering_2", SUBARU_MAIN_BUS,
                                               {"Steering_Angle": steering_angle})),
       ]
+      frame += 1
       return CI.update([(frame * 10_000_000, can_sends)])
 
-    # The global Subaru driver-torque threshold is strict: exactly +/-80 does
-    # not count as an override, while the next representable value does.
-    for frame, (steering_torque, steering_pressed) in enumerate(((0, False), (80, False), (-80, False),
-                                                                 (81, True), (-81, True))):
-      CS = update_carstate(steering_torque, 0, frame)
-      self.assertEqual(CS.steeringPressed, steering_pressed)
+    # sustained sub-threshold torque never registers, in either direction
+    for steering_torque in (0, 80, -80):
+      for _ in range(DEBOUNCE_COUNT + 2):
+        CS = update_carstate(steering_torque, 0)
+        self.assertFalse(CS.steeringPressed)
+        self.assertFalse(track_expected_pressed(steering_torque))
+
+    # isolated spikes above the threshold are filtered out entirely
+    for i in range((MIN_COUNT + 1) * 2 + 1):
+      steering_torque = 500 if i % 4 == 0 else 30
+      CS = update_carstate(steering_torque, 0)
+      self.assertFalse(CS.steeringPressed)
+      self.assertFalse(track_expected_pressed(steering_torque))
+
+    # sustained overrides register once the debounce window elapses
+    for steering_torque in (81, -81):
+      # Drain any state left by the previous case so each direction starts
+      # from the bottom of the counter and proves the activation boundary.
+      for _ in range(MIN_COUNT * 2 + 1):
+        CS = update_carstate(0, 0)
+        self.assertEqual(CS.steeringPressed, track_expected_pressed(0))
+      self.assertFalse(CS.steeringPressed)
+
+      for i in range(DEBOUNCE_COUNT + 3):
+        CS = update_carstate(steering_torque, 0)
+        expected_pressed = track_expected_pressed(steering_torque)
+        self.assertEqual(CS.steeringPressed, expected_pressed)
+        self.assertEqual(expected_pressed, i >= MIN_COUNT)
 
     # Exercise normal control, a driver override, resumption after the driver
     # releases the wheel, another override, and finally a full disengagement.
-    sequence = [(True, 0, 0)] * 2
-    sequence += [(True, 80, 0)] * 2
-    sequence += [(True, -80, 0)] * 2
-    sequence += [(True, 81, 5)] * 2
-    sequence += [(True, 81, 10)] * 2
-    sequence += [(True, 81, 15)] * 2
-    sequence += [(True, 0, 15)] * 4
-    sequence += [(True, -81, 18)] * 2
-    sequence += [(True, -81, 20)] * 2
-    sequence += [(False, -81, 20)] * 2
-    sequence += [(False, 0, 20)] * 2
+    # Each phase runs past the debounce window so states settle within it.
+    sequence = (
+      [(True, 0, 0)] * (DEBOUNCE_COUNT + 2) +
+      [(True, 81, 5)] * (DEBOUNCE_COUNT + 2) +
+      [(True, 0, 10)] * (DEBOUNCE_COUNT + 2) +
+      [(True, -81, 15)] * (DEBOUNCE_COUNT + 2) +
+      [(False, -81, 20)] * (DEBOUNCE_COUNT + 2) +
+      [(False, 0, 20)] * (DEBOUNCE_COUNT + 2)
+    )
 
     angle_msgs = 0
-    for frame, (lat_active, steering_torque, steering_angle) in enumerate(sequence):
+    for offset, (lat_active, steering_torque, steering_angle) in enumerate(sequence):
       self.assertTrue(self._rx(self._angle_meas_msg(steering_angle)))
 
-      CS = update_carstate(steering_torque, steering_angle, frame + 5)
-      steering_pressed = abs(steering_torque) > 80
+      CS = update_carstate(steering_torque, steering_angle)
+      steering_pressed = track_expected_pressed(steering_torque)
       self.assertEqual(CS.steeringPressed, steering_pressed)
       self.assertAlmostEqual(CS.steeringAngleDeg, steering_angle, places=2)
 
@@ -374,7 +413,7 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
             self.assertAlmostEqual(apply_angle, steering_angle, places=2)
 
           packet = libsafety_py.make_CANPacket(addr, bus, dat)
-          self.assertTrue(self._tx(packet), f"rejected driver override angle TX at {frame=} {steering_angle=}")
+          self.assertTrue(self._tx(packet), f"rejected driver override angle TX at {offset=} {steering_angle=}")
 
     self.assertEqual(angle_msgs, (len(sequence) + 1) // 2)
 
