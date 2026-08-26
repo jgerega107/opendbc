@@ -1,0 +1,110 @@
+name: Sync release-mici Crosstrek branch
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-release-mici-crosstrek-2025
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.repository == 'jgerega107/opendbc' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out Crosstrek branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: release-mici-crosstrek-2025
+
+      - name: Resolve and merge release-mici opendbc source
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/commaai/opendbc.git
+
+          release_snapshot="$(git ls-remote https://github.com/commaai/openpilot.git refs/heads/release-mici | awk '{print $1}')"
+          test -n "$release_snapshot"
+          git fetch --no-tags https://github.com/commaai/openpilot.git \
+            "$release_snapshot:refs/sync/openpilot-release"
+
+          source_commit="$(git show refs/sync/openpilot-release:git_src_commit | tr -d '[:space:]')"
+          test -n "$source_commit"
+          git fetch --no-tags https://github.com/commaai/openpilot.git \
+            "$source_commit:refs/sync/openpilot-source"
+
+          required_opendbc="$(git ls-tree refs/sync/openpilot-source opendbc_repo | awk '$1 == "160000" {print $3}')"
+          test -n "$required_opendbc"
+          git fetch --no-tags upstream \
+            "$required_opendbc:refs/sync/required-opendbc"
+
+          release_version="$(git show refs/sync/openpilot-release:RELEASES.md | sed -n 's/^Version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+          echo "release-mici v${release_version:-unknown}: $release_snapshot"
+          echo "openpilot source: $source_commit"
+          echo "required opendbc: $required_opendbc"
+
+          before="$(git rev-parse HEAD)"
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "required_opendbc=$required_opendbc" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor refs/sync/required-opendbc HEAD; then
+            echo "Required opendbc source is already incorporated"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge-base HEAD refs/sync/required-opendbc >/dev/null; then
+            echo "Required opendbc source has unrelated history; manual reconciliation is required" >&2
+            exit 1
+          fi
+
+          if ! git merge --no-commit --no-ff refs/sync/required-opendbc; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            if (( ${#conflicts[@]} == 0 )); then
+              echo "Merge failed without producing resolvable conflicts" >&2
+              exit 1
+            fi
+            for path in "${conflicts[@]}"; do
+              if [[ "$path" != .github/workflows/* ]]; then
+                echo "Merge conflict outside .github/workflows: $path" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          # Keep the fork's workflow definitions when they conflict with
+          # upstream workflow changes. They are intentionally maintained on
+          # the vehicle branch as well as the default branch.
+          if git ls-files -u -- .github/workflows | grep -q .; then
+            git checkout --ours -- .github/workflows
+            git add .github/workflows
+          fi
+          git commit --no-edit
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up uv
+        if: steps.merge.outputs.changed == 'true'
+        uses: astral-sh/setup-uv@v7
+
+      - name: Test synchronized safety code
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          grep -q 'SUBARU_CROSSTREK_2025' opendbc/car/subaru/values.py
+          ./opendbc/safety/tests/test.sh
+          git diff --check "${{ steps.merge.outputs.before }}"..HEAD
+
+      - name: Publish synchronized branch
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin HEAD:refs/heads/release-mici-crosstrek-2025
