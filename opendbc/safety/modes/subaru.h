@@ -159,15 +159,19 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
 
     // Experimental Crosstrek calibration; physical parameters are not validated.
     // Other angle ports retain their existing Ascent model.
-    const AngleSteeringParams SUBARU_STEERING_PARAMS = subaru_crosstrek_angle_model ? (AngleSteeringParams) {
+    const AngleSteeringParams SUBARU_CROSSTREK_STEERING_PARAMS = {
       .slip_factor = -0.0006281955863217758,
       .steer_ratio = 13.0,
       .wheelbase = 2.67,
-    } : (AngleSteeringParams) {
+    };
+    const AngleSteeringParams SUBARU_ASCENT_STEERING_PARAMS = {
       .slip_factor = -0.000580374471400815,
       .steer_ratio = 13.5,
       .wheelbase = 2.89,
     };
+
+    const AngleSteeringParams SUBARU_STEERING_PARAMS = subaru_crosstrek_angle_model ?
+      SUBARU_CROSSTREK_STEERING_PARAMS : SUBARU_ASCENT_STEERING_PARAMS;
 
     int desired_angle = GET_BYTES_LE(msg, 5, 3) & 0x1FFFFU;
     desired_angle = -1 * to_signed(desired_angle, 17);
