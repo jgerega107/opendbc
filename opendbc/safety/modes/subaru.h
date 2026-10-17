@@ -64,6 +64,7 @@
 
 static bool subaru_gen2 = false;
 static bool subaru_lkas_angle = false;
+static bool subaru_crosstrek_angle_model = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -149,14 +150,20 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
 
   // angle steer cmd checks
   if (msg->addr == MSG_SUBARU_ES_LKAS_ANGLE) {
-    // Based on SUBARU_ASCENT (most restrictive slip factor)
+    // Model selection must match get_safety_CP() in the Subaru controller.
     const AngleSteeringLimits SUBARU_ANGLE_STEERING_LIMITS = {
       .max_angle = 190 * 100,
       .angle_deg_to_can = 100.,
       .frequency = 50U,
     };
 
-    const AngleSteeringParams SUBARU_STEERING_PARAMS = {
+    // Experimental Crosstrek calibration; physical parameters are not validated.
+    // Other angle ports retain their existing Ascent model.
+    const AngleSteeringParams SUBARU_STEERING_PARAMS = subaru_crosstrek_angle_model ? (AngleSteeringParams) {
+      .slip_factor = -0.0006281955863217758,
+      .steer_ratio = 13.0,
+      .wheelbase = 2.67,
+    } : (AngleSteeringParams) {
       .slip_factor = -0.000580374471400815,
       .steer_ratio = 13.5,
       .wheelbase = 2.89,
@@ -221,9 +228,11 @@ static safety_config subaru_init(uint16_t param) {
 
   const uint16_t SUBARU_PARAM_GEN2 = 1;
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
+  const uint16_t SUBARU_PARAM_CROSSTREK_ANGLE_MODEL = 16;
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
+  subaru_crosstrek_angle_model = subaru_gen2 && subaru_lkas_angle && GET_FLAG(param, SUBARU_PARAM_CROSSTREK_ANGLE_MODEL);
 
   // TODO: re-enable once more work is done on the limits
   // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689

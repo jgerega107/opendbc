@@ -5,7 +5,7 @@ from opendbc.car.common.filter_simple import FirstOrderFilter
 from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
-from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.subaru.values import CAR, DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
 from opendbc.car.vehicle_model import VehicleModel
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
@@ -19,10 +19,12 @@ ANGLE_FILTER_SPEED_BP = [2.0, 10.0]
 ANGLE_FILTER_RC_V = [0.2, 0.0]
 
 
-def get_safety_CP():
-  # Use the Ascent for lateral limiting to match safety (most restrictive slip factor)
+def get_safety_CP(car_fingerprint=None):
+  # Keep existing angle ports on the Ascent model. The experimental Crosstrek
+  # model must match safety's CROSSTREK_ANGLE_MODEL parameter and rebuilt firmware.
   from opendbc.car.subaru.interface import CarInterface
-  return CarInterface.get_non_essential_params("SUBARU_ASCENT")
+  candidate = CAR.SUBARU_CROSSTREK_2025 if car_fingerprint == CAR.SUBARU_CROSSTREK_2025 else CAR.SUBARU_ASCENT
+  return CarInterface.get_non_essential_params(candidate)
 
 
 class CarController(CarControllerBase):
@@ -38,7 +40,7 @@ class CarController(CarControllerBase):
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
     if CP.flags & SubaruFlags.LKAS_ANGLE:
-      self.VM = VehicleModel(get_safety_CP())
+      self.VM = VehicleModel(get_safety_CP(CP.carFingerprint))
       self.angle_filter = FirstOrderFilter(0.0, ANGLE_FILTER_RC_V[0], DT_CTRL * self.p.STEER_STEP)
 
   def update(self, CC, CS, now_nanos):

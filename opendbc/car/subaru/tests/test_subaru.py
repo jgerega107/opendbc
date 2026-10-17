@@ -51,7 +51,7 @@ class TestSubaruCrosstrek2025(unittest.TestCase):
     self.assertTrue(CP.safetyConfigs[0].safetyParam & SubaruSafetyFlags.LKAS_ANGLE)
     self.assertFalse(CP.openpilotLongitudinalControl)
     self.assertAlmostEqual(CP.wheelbase, 2.67, places=6)
-    self.assertAlmostEqual(CP.steerRatio, 17, places=6)
+    self.assertAlmostEqual(CP.steerRatio, 13.0, places=6)
 
   def test_low_speed_angle_filter_is_continuous(self):
     # The old deadzone jumped from 0 to 5 degrees when this target crossed 6 degrees.

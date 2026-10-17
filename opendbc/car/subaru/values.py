@@ -71,6 +71,7 @@ class SubaruSafetyFlags(IntFlag):
   LONG = 2
   PREGLOBAL_REVERSED_DRIVER_TORQUE = 4
   LKAS_ANGLE = 8
+  CROSSTREK_ANGLE_MODEL = 16
 
 
 class SubaruFlags(IntFlag):
@@ -228,7 +229,9 @@ class CAR(Platforms):
   )
   SUBARU_CROSSTREK_2025 = SubaruGen2PlatformConfig(
     [SubaruCarDocs("Subaru Crosstrek 2025", "All", car_parts=CarParts.common([CarHarness.subaru_d]))],
-    CarSpecs(wheelbase=2.67, steerRatio=17),
+    # Experimental calibration from jacobwaller's hackathon-crosstrek branch.
+    # Physical steering ratio still requires independent vehicle validation.
+    CarSpecs(wheelbase=2.67, steerRatio=13.0),
     flags=SubaruFlags.LKAS_ANGLE,
   )
 

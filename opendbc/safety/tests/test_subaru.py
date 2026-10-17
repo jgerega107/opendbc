@@ -150,6 +150,7 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
   ANGLE_RATE_DOWN = None
 
   LATERAL_FREQUENCY = 50
+  SAFETY_CAR = None
 
   cnt_angle_cmd = 0
 
@@ -157,7 +158,7 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
     self.__class__.cnt_angle_cmd = 0
     super().setUp()
     from opendbc.car.subaru.carcontroller import get_safety_CP
-    self.VM = VehicleModel(get_safety_CP())
+    self.VM = VehicleModel(get_safety_CP(self.SAFETY_CAR))
 
   def _speed_msg(self, speed):
     # speed is in m/s for angle tests, convert to kph for DBC
@@ -412,6 +413,19 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
           self.assertTrue(self._tx(packet), f"rejected driver override angle TX at {offset=} {steering_angle=}")
 
     self.assertEqual(angle_msgs, (len(sequence) + 1) // 2)
+
+class TestSubaruGen2CrosstrekAngleStockLongitudinalSafety(TestSubaruGen2AngleStockLongitudinalSafety):
+  SAFETY_PARAM = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.CROSSTREK_ANGLE_MODEL
+  SAFETY_CAR = CAR.SUBARU_CROSSTREK_2025
+
+
+class TestSubaruGen1IgnoresCrosstrekModel(TestSubaruGen1AngleStockLongitudinalSafety):
+  SAFETY_PARAM = SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.CROSSTREK_ANGLE_MODEL
+
+
+class TestSubaruGen2TorqueIgnoresCrosstrekModel(TestSubaruGen2TorqueStockLongitudinalSafety):
+  SAFETY_PARAM = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.CROSSTREK_ANGLE_MODEL
+
 
 if __name__ == "__main__":
   unittest.main()
