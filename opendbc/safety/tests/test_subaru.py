@@ -320,11 +320,11 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
             CI.update([])
             CI.CS.out.vEgoRaw = speed
 
-            def controller_tx(lat_active, measured):
+            def controller_tx(lat_active, measured, CI=CI, target_angle=sign * 5):
               CI.CS.out.steeringAngleDeg = measured
               CC = structs.CarControl()
               CC.latActive = lat_active
-              CC.actuators.steeringAngleDeg = sign * 5
+              CC.actuators.steeringAngleDeg = target_angle
               # Start on a steering tick and include the following non-TX tick.
               _, sends = CI.apply(CC.as_reader(), 0)
               CI.apply(CC.as_reader(), 0)
