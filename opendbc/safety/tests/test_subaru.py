@@ -226,6 +226,90 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
         self.assertFalse(ret)
         self.assertFalse(self.safety.get_controls_allowed())
 
+  # Adapted from jacobwaller/opendbc hackathon-crosstrek, commit 753fdd38.
+  def test_rx_wrong_bus(self):
+    for make_msg, get_value in ((self._angle_meas_msg, self.safety.get_angle_meas_max),
+                                (self._pcm_status_msg, self.safety.get_controls_allowed)):
+      for bus in range(3):
+        with self.subTest(message=make_msg.__name__, bus=bus):
+          self._reset_angle_safety()
+          msg = make_msg(1)
+          expected_bus = msg[0].bus
+          msg[0].bus = bus
+          self._rx(msg)
+          # Include the expected bus as a positive control.
+          expected = self.DEG_TO_CAN if make_msg == self._angle_meas_msg else 1
+          self.assertEqual(get_value(), expected if bus == expected_bus else 0)
+
+  def test_stale_es_brake_cannot_engage(self):
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertTrue(self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._rx(self._user_brake_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self._rx(self._pcm_status_msg(False)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+    # ES_Brake may remain high after ACC cancels at a stop. Only ES_Status
+    # is authoritative for cruise activation in angle-control safety.
+    self._rx(self.packer.make_can_msg_safety("ES_Brake", self.ALT_MAIN_BUS, {"Cruise_Activated": 1}))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self._rx(self._pcm_status_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_controller_angle_safety_transitions(self):
+    platform = CAR.SUBARU_CROSSTREK_2025 if self.SAFETY_PARAM & SubaruSafetyFlags.GEN2 else CAR.SUBARU_FORESTER_2022
+    # Synthetic engagement above the nominal bound, and a speed increase
+    # that lowers the bound. Existing exact accel/jerk limit tests remain.
+    for start_speed, end_speed, measured, desired in ((13.24, 13.24, 51.59, 46.21), (13.0, 13.5, 46.75, 46.75)):
+      for sign in (-1, 1):
+        with self.subTest(sign=sign, start_speed=start_speed, end_speed=end_speed):
+          self._reset_angle_safety()
+          CI = CarInterface(CarInterface.get_non_essential_params(platform))
+          CI.update([])
+          self._reset_angle_measurement(sign * measured)
+          CC = structs.CarControl()
+          CC.actuators.steeringAngleDeg = sign * desired
+          angle_messages = 0
+          previous_tx_active = False
+          for frame in range(100):
+            speed = start_speed if frame < 20 else end_speed
+            CI.CS.out = structs.CarState(vEgo=speed, vEgoRaw=speed, steeringAngleDeg=sign * measured)
+            self._reset_speed_measurement(speed)
+            CC.latActive = frame not in (0, 50)
+            self.safety.set_controls_allowed(CC.latActive)
+            self.safety.set_timer(frame * 10_000)
+            _, messages = CI.apply(CC.as_reader(), frame * 10_000_000)
+            for addr, data, bus in messages:
+              if addr == SubaruMsg.ES_LKAS_ANGLE:
+                angle_messages += 1
+                # Permit one inactive synchronization TX at an engagement edge,
+                # so this coverage also composes with engagement-sync fixes.
+                if not CC.latActive or previous_tx_active:
+                  self.assertEqual(bool(data[1] & 0x10), CC.latActive)
+                previous_tx_active = CC.latActive
+                self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, data)), f"frame {frame}")
+          self.assertEqual(angle_messages, 50)
+
+  def test_inactive_angle_moving_measurement_order(self):
+    # Exercise the rolling measurement window without requiring an
+    # engagement transition: an inactive command follows a moving wheel.
+    for sign in (-1, 1):
+      for measurement_before_tx in (False, True):
+        with self.subTest(sign=sign, measurement_before_tx=measurement_before_tx):
+          self._reset_angle_safety()
+          self._reset_angle_measurement(sign * 5)
+          for frame in range(20):
+            angle = sign * (5 + frame * 0.01)
+            msg = self._angle_meas_msg(angle)
+            if measurement_before_tx:
+              self.assertTrue(self._rx(msg))
+            # The other ordering is one CAN unit newer than the latest sample,
+            # within the existing inactive-angle tolerance in either direction.
+            self.assertTrue(self._tx(self._angle_cmd_msg(angle, False)))
+            self.assertFalse(self.safety.get_controls_allowed())
+            if not measurement_before_tx:
+              self.assertTrue(self._rx(msg))
+
   def test_lateral_accel_limit(self):
     for speed in np.linspace(0, 40, 100):
       speed = max(speed, 1)
