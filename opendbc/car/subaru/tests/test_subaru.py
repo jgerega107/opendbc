@@ -38,7 +38,11 @@ class TestSubaruCrosstrek2025(unittest.TestCase):
 
   @classmethod
   def _controller_angle(cls, speed, target_angle, lat_active=True, steering_angle=0, steering_pressed=False):
-    return cls._apply_controller_angle(cls._new_controller(), speed, target_angle, lat_active, steering_angle, steering_pressed)
+    CI = cls._new_controller()
+    # Synchronization frame, intervening non-steering tick, then active output.
+    for _ in range(2):
+      cls._apply_controller_angle(CI, speed, target_angle, lat_active, steering_angle, steering_pressed)
+    return cls._apply_controller_angle(CI, speed, target_angle, lat_active, steering_angle, steering_pressed)
 
   def test_interface_configuration(self):
     CP = CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025)
@@ -93,3 +97,23 @@ class TestSubaruCrosstrek2025(unittest.TestCase):
 
   def test_inactive_angle_control_follows_measured_angle(self):
     self.assertAlmostEqual(self._controller_angle(5, 190, lat_active=False, steering_angle=37), 37, places=6)
+
+  def test_engagement_synchronizes_filter_and_angle(self):
+    CI = self._new_controller()
+    angle = self._apply_controller_angle(CI, 2, 50, steering_angle=12)
+    self.assertAlmostEqual(angle, 12)
+    self.assertAlmostEqual(CI.CC.angle_filter.x, 12)
+    self._apply_controller_angle(CI, 2, 50, steering_angle=12)
+    angle = self._apply_controller_angle(CI, 2, 50, steering_angle=12)
+    self.assertGreater(angle, 12)
+    self.assertLess(angle, 17)
+
+  def test_non_steering_tick_disengagement_requires_resynchronization(self):
+    for override in (False, True):
+      with self.subTest(override=override):
+        CI = self._new_controller()
+        self._apply_controller_angle(CI, 20, 0)
+        # Frame 1 does not transmit steering, but must invalidate readiness.
+        self._apply_controller_angle(CI, 20, 0, lat_active=override, steering_pressed=override)
+        angle = self._apply_controller_angle(CI, 20, 10, steering_angle=3)
+        self.assertAlmostEqual(angle, 3)

@@ -30,6 +30,7 @@ class CarController(CarControllerBase):
     super().__init__(dbc_names, CP)
     self.apply_torque_last = 0
     self.apply_angle_last = 0
+    self.angle_control_ready = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -49,11 +50,21 @@ class CarController(CarControllerBase):
     can_sends = []
 
     # *** steering ***
+    # Reset even between steering transmissions, so a brief disengagement or
+    # driver override cannot skip synchronization when control resumes.
+    if not CC.latActive or CS.out.steeringPressed:
+      self.angle_control_ready = False
     if (self.frame % self.p.STEER_STEP) == 0:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
         # Yield angle control while the driver is steering so the command tracks
         # the measured angle before control resumes or disengages.
-        lat_active = CC.latActive and not CS.out.steeringPressed
+        angle_control_requested = CC.latActive and not CS.out.steeringPressed
+        # Safety can reset its angle baseline to a newer measurement while
+        # controls are disallowed. Send one inactive measured-angle frame on
+        # engagement/resumption before rate limiting active commands from it.
+        # With controls allowed, this synchronizes both command baselines.
+        lat_active = angle_control_requested and self.angle_control_ready
+        self.angle_control_ready = angle_control_requested
         apply_angle = actuators.steeringAngleDeg
         if lat_active:
           filter_rc = float(np.interp(CS.out.vEgoRaw, ANGLE_FILTER_SPEED_BP, ANGLE_FILTER_RC_V))
