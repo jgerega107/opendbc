@@ -1,6 +1,8 @@
 import unittest
 
+from opendbc.can import CANPacker
 from opendbc.car import structs
+from opendbc.car.can_definitions import CanData
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru.interface import CarInterface
 from opendbc.car.subaru.values import CAR, SubaruFlags, SubaruSafetyFlags
@@ -117,3 +119,47 @@ class TestSubaruCrosstrek2025(unittest.TestCase):
         self._apply_controller_angle(CI, 20, 0, lat_active=override, steering_pressed=override)
         angle = self._apply_controller_angle(CI, 20, 10, steering_angle=3)
         self.assertAlmostEqual(angle, 3)
+
+  def test_recovery_reports_temporary_unavailability(self):
+    CI = self._new_controller()
+    packer = CANPacker("subaru_global_2017_generated")
+    frame = 0
+
+    def update(measured, eps_warning=False):
+      nonlocal frame
+      frame += 1
+      msgs = [
+        packer.make_can_msg("Wheel_Speeds", 1, {k: 72 for k in ("FL", "FR", "RL", "RR")}),
+        packer.make_can_msg("Steering_2", 0, {"Steering_Angle": measured}),
+        packer.make_can_msg("Steering_Torque", 0, {"Steer_Warning": eps_warning}),
+      ]
+      return CI.update([(frame * 10_000_000, [CanData(*msg) for msg in msgs])])
+
+    # Neither a driver override nor the ordinary synchronization frame should
+    # generate a controller-unavailable warning.
+    for _ in range(2):
+      self._apply_controller_angle(CI, 20, 0, steering_angle=25, steering_pressed=True)
+    self.assertFalse(update(25).steerFaultTemporary)
+    for _ in range(2):
+      self._apply_controller_angle(CI, 20, 0, steering_angle=20)
+    self.assertFalse(update(20).steerFaultTemporary)
+
+    self._apply_controller_angle(CI, 20, 0, lat_active=False, steering_angle=25)
+    for _ in range(2):
+      self._apply_controller_angle(CI, 20, 0, steering_angle=25)
+    self.assertTrue(CI.CC.angle_control_recovery)
+    self.assertTrue(update(25).steerFaultTemporary)
+    # controlsd disables latActive in response to temporary unavailability.
+    # That must not hide the warning or prevent recovery when the wheel returns.
+    for _ in range(10):
+      self._apply_controller_angle(CI, 20, 0, lat_active=False, steering_angle=25)
+      self.assertTrue(update(25).steerFaultTemporary)
+    self.assertFalse(update(22).steerFaultTemporary)
+    self.assertFalse(CI.CC.angle_control_recovery)
+    self.assertTrue(update(22, eps_warning=True).steerFaultTemporary)
+    self.assertFalse(update(22).steerFaultTemporary)
+
+  def test_torque_port_ignores_angle_recovery_state(self):
+    CI = CarInterface(CarInterface.get_non_essential_params(CAR.SUBARU_IMPREZA))
+    CI.CC.angle_control_recovery = True
+    self.assertFalse(CI.update([]).steerFaultTemporary)
