@@ -329,7 +329,11 @@ routes = [
   CarTestRoute("1bbe6bf2d62f58a8/2022-07-14--17-11-43", SUBARU.SUBARU_OUTBACK, segment=10),
   CarTestRoute("c56e69bbc74b8fad/2022-08-18--09-43-51", SUBARU.SUBARU_LEGACY, segment=3),
   CarTestRoute("f4e3a0c511a076f4/2022-08-04--16-16-48", SUBARU.SUBARU_CROSSTREK_HYBRID, segment=2),
-  CarTestRoute("f73c01590368ee5b/00000017--117e1dd96d", SUBARU.SUBARU_CROSSTREK_2025),
+  # Full-rate Crosstrek logs: engagement/cancel, stock alerts, and two steering-limit interventions.
+  CarTestRoute("2c0414e46036a79e/00000063--0d0b046bdc", SUBARU.SUBARU_CROSSTREK_2025, segment=2),
+  CarTestRoute("2c0414e46036a79e/00000063--0d0b046bdc", SUBARU.SUBARU_CROSSTREK_2025, segment=34),
+  CarTestRoute("2c0414e46036a79e/00000063--0d0b046bdc", SUBARU.SUBARU_CROSSTREK_2025, segment=63),
+  CarTestRoute("2c0414e46036a79e/00000063--0d0b046bdc", SUBARU.SUBARU_CROSSTREK_2025, segment=66),
   CarTestRoute("7fd1e4f3a33c1673/2022-12-04--15-09-53", SUBARU.SUBARU_FORESTER_2022, segment=4),
   CarTestRoute("f3b34c0d2632aa83/2023-07-23--20-43-25", SUBARU.SUBARU_OUTBACK_2023, segment=7),
   CarTestRoute("99437cef6d5ff2ee/2023-03-13--21-21-38", SUBARU.SUBARU_ASCENT_2023, segment=7),
