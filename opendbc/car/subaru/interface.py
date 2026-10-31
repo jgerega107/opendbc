@@ -109,6 +109,14 @@ class CarInterface(CarInterfaceBase):
 
     return ret
 
+  def update(self, can_packets):
+    ret = super().update(can_packets)
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      # Also report controller recovery as temporary steering unavailability.
+      # This is not an EPS failure; preserve any actual EPS warning via OR.
+      ret.steerFaultTemporary |= self.CC.update_angle_control_recovery(ret)
+    return ret
+
   @staticmethod
   def init(CP, can_recv, can_send, communication_control=None):
     if CP.flags & SubaruFlags.DISABLE_EYESIGHT:

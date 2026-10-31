@@ -271,7 +271,7 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
           CC = structs.CarControl()
           CC.actuators.steeringAngleDeg = sign * desired
           angle_messages = 0
-          previous_tx_active = False
+          active_messages = 0
           for frame in range(100):
             speed = start_speed if frame < 20 else end_speed
             CI.CS.out = structs.CarState(vEgo=speed, vEgoRaw=speed, steeringAngleDeg=sign * measured)
@@ -283,13 +283,16 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
             for addr, data, bus in messages:
               if addr == SubaruMsg.ES_LKAS_ANGLE:
                 angle_messages += 1
-                # Permit one inactive synchronization TX at an engagement edge,
-                # so this coverage also composes with engagement-sync fixes.
-                if not CC.latActive or previous_tx_active:
-                  self.assertEqual(bool(data[1] & 0x10), CC.latActive)
-                previous_tx_active = CC.latActive
+                request = bool(data[1] & 0x10)
+                active_messages += request
+                if not CC.latActive:
+                  self.assertFalse(request)
                 self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, data)), f"frame {frame}")
           self.assertEqual(angle_messages, 50)
+          # Arming uses the safety envelope, including its speed tolerance;
+          # the normal controller command limits remain more conservative.
+          can_start = measured <= CI.CC.get_angle_control_bound(start_speed)
+          self.assertEqual(active_messages > 0, can_start)
 
   def test_inactive_angle_moving_measurement_order(self):
     # Exercise the rolling measurement window without requiring an
@@ -480,6 +483,131 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
     self.safety.set_controls_allowed(True)
     legacy_angle = apply_steer_angle_limits_vm(-5, -2.4, 30, -2.3, True, CarControllerParams, self.VM)
     self.assertFalse(self._tx(self._angle_cmd_msg(legacy_angle, True)))
+
+  def test_crosstrek_controller_recovers_outside_angle_envelope(self):
+    for sign in (-1, 1):
+      with self.subTest(sign=sign):
+        self._reset_angle_safety()
+        CI = CarInterface(CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025))
+        CI.update([])
+        last_angle = 0.0
+
+        def tick(speed, measured, target, expected_request, lat_active=True, steering_pressed=False, CI=CI, sign=sign):
+          nonlocal last_angle
+          self._reset_speed_measurement(speed)
+          self._reset_angle_measurement(sign * measured)
+          self.safety.set_controls_allowed(lat_active)
+          self.safety.set_timer(CI.CC.frame * 10_000)
+          CI.CS.out = structs.CarState(vEgo=speed, vEgoRaw=speed, steeringAngleDeg=sign * measured, steeringPressed=steering_pressed)
+          CC = structs.CarControl(latActive=lat_active)
+          CC.actuators.steeringAngleDeg = sign * target
+          _, messages = CI.apply(CC.as_reader(), CI.CC.frame * 10_000_000)
+          for addr, data, bus in messages:
+            if addr == SubaruMsg.ES_LKAS_ANGLE:
+              angle, request = self._decode_angle_cmd(data)
+              self.assertEqual(request, expected_request, f"frame {CI.CC.frame - 1}")
+              if not request:
+                self.assertAlmostEqual(angle, sign * measured, places=2)
+              self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, data)), f"frame {CI.CC.frame - 1}")
+              last_angle = sign * angle
+
+        # Original failure: safety rejects the first active 24.55-degree
+        # command and resets its baseline to 25, while the controller ramps
+        # toward zero and never recovers. Keep a valid inactive baseline instead.
+        for _ in range(150):
+          tick(20, 25, 0, False)
+        # The driver brings the wheel inside the envelope. Synchronize once,
+        # then verify every command through full recovery against compiled C.
+        for _ in range(2):
+          tick(20, 22, 0, False)
+        for _ in range(120):
+          tick(20, last_angle, 0, True)
+        self.assertAlmostEqual(last_angle, 0)
+
+        # A driver override outside the envelope must not arm on release.
+        for _ in range(2):
+          tick(20, 25, 0, False, steering_pressed=True)
+        for _ in range(10):
+          tick(20, 25, 0, False)
+        for _ in range(2):
+          tick(20, 20, 0, False)
+        for _ in range(2):
+          tick(20, last_angle, 0, True)
+
+        # A one-tick disable (e.g. a transient steering fault) between steering
+        # transmissions still requires a fresh inactive synchronization frame.
+        tick(20, last_angle, 0, True)
+        tick(20, last_angle, 0, False, lat_active=False)
+        for _ in range(2):
+          tick(20, last_angle, 0, False)
+        for _ in range(2):
+          tick(20, last_angle, 0, True)
+
+        # First synchronize at a lower speed with a larger permissible angle.
+        for _ in range(2):
+          tick(10, 40, 40, False, lat_active=False)
+        for _ in range(2):
+          tick(10, 40, 40, False)
+        for _ in range(2):
+          tick(10, 40, 40, True)
+        # A speed rise can make even the rate-limited output exceed the new
+        # acceleration envelope. Return to inactive tracking, then recover.
+        for _ in range(20):
+          tick(20, 40, 0, False)
+        for _ in range(2):
+          tick(20, 20, 0, False)
+        for _ in range(100):
+          tick(20, last_angle, 0, True)
+        self.assertAlmostEqual(last_angle, 0)
+
+  def test_crosstrek_controller_envelope_boundary_does_not_chatter(self):
+    for speed in (0, 5, 7.3, 10.123, 20.123, 30, 40):
+      # Match the speed quantization carried by the four wheel-speed signals.
+      speed = away_round(speed * 3.6 / 0.057) * 0.057 / 3.6
+      for sign in (-1, 1):
+        with self.subTest(speed=speed, sign=sign):
+          self._reset_angle_safety()
+          CI = CarInterface(CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025))
+          CI.update([])
+          self._reset_speed_measurement(speed)
+          self.safety.set_controls_allowed(True)
+          # Adjacent, representable CAN measurements straddle the arming bound.
+          below = float(np.floor(CI.CC.get_angle_control_bound(speed) * 100) / 100)
+          above = below + 0.01
+          for frame in range(100):
+            measured = below if frame < 2 or (frame // 2) % 2 == 0 else above
+            self._reset_angle_measurement(sign * measured)
+            self.safety.set_timer(frame * 10_000)
+            CI.CS.out = structs.CarState(vEgo=speed, vEgoRaw=speed, steeringAngleDeg=sign * measured)
+            CC = structs.CarControl(latActive=True)
+            CC.actuators.steeringAngleDeg = sign * 40
+            _, messages = CI.apply(CC.as_reader(), frame * 10_000_000)
+            for addr, data, bus in messages:
+              if addr == SubaruMsg.ES_LKAS_ANGLE:
+                _, request = self._decode_angle_cmd(data)
+                self.assertEqual(request, frame >= 2)
+                self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, data)))
+
+  def test_crosstrek_controller_preserves_safety_speed_tolerance(self):
+    self._reset_angle_safety()
+    CI = CarInterface(CarInterface.get_non_essential_params(CAR.SUBARU_CROSSTREK_2025))
+    CI.update([])
+    self._reset_angle_measurement(24)
+    self.safety.set_controls_allowed(True)
+    for frame in range(100):
+      speed = 19 if frame < 4 else 20
+      self._reset_speed_measurement(speed)
+      self.safety.set_timer(frame * 10_000)
+      CI.CS.out = structs.CarState(vEgo=speed, vEgoRaw=speed, steeringAngleDeg=24)
+      CC = structs.CarControl(latActive=True)
+      CC.actuators.steeringAngleDeg = 24
+      _, messages = CI.apply(CC.as_reader(), frame * 10_000_000)
+      for addr, data, bus in messages:
+        if addr == SubaruMsg.ES_LKAS_ANGLE:
+          _, request = self._decode_angle_cmd(data)
+          self.assertEqual(request, frame >= 2)
+          self.assertTrue(self._tx(libsafety_py.make_CANPacket(addr, bus, data)))
+      self.assertFalse(CI.CC.angle_control_recovery)
 
   def test_crosstrek_controller_driver_override(self):
     self._reset_angle_safety()

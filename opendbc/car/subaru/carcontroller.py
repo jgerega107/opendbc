@@ -1,8 +1,9 @@
+import math
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg
 from opendbc.car.common.filter_simple import FirstOrderFilter
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance, get_max_angle_vm
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import CAR, DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
@@ -33,6 +34,7 @@ class CarController(CarControllerBase):
     self.apply_torque_last = 0
     self.apply_angle_last = 0
     self.angle_control_ready = False
+    self.angle_control_recovery = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -43,6 +45,20 @@ class CarController(CarControllerBase):
     if CP.flags & SubaruFlags.LKAS_ANGLE:
       self.VM = VehicleModel(get_safety_CP(CP.carFingerprint))
       self.angle_filter = FirstOrderFilter(0.0, ANGLE_FILTER_RC_V[0], DT_CTRL * self.p.STEER_STEP)
+
+  def get_angle_control_bound(self, speed):
+    # Safety uses the minimum speed in its sample window, rounded to 0.001 m/s,
+    # minus 1 m/s. Round the current speed up for a conservative bound; retain
+    # the stricter nominal speed for normal command limiting below.
+    safety_speed = max(math.ceil(speed * 1000) / 1000 - 1.0, 1.0)
+    return min(get_max_angle_vm(safety_speed, self.VM, CarControllerParams), self.p.ANGLE_LIMITS.STEER_ANGLE_MAX)
+
+  def update_angle_control_recovery(self, CS):
+    # Clear independently of latActive: the temporary-unavailable alert itself
+    # disables lateral control while waiting for a safe measured baseline.
+    if self.angle_control_recovery and abs(CS.steeringAngleDeg) <= self.get_angle_control_bound(CS.vEgoRaw):
+      self.angle_control_recovery = False
+    return self.angle_control_recovery
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -65,20 +81,34 @@ class CarController(CarControllerBase):
         # controls are disallowed. Send one inactive measured-angle frame on
         # engagement/resumption before rate limiting active commands from it.
         # With controls allowed, this synchronizes both command baselines.
-        lat_active = angle_control_requested and self.angle_control_ready
-        self.angle_control_ready = angle_control_requested
+        self.update_angle_control_recovery(CS.out)
+        max_angle = self.get_angle_control_bound(CS.out.vEgoRaw)
+        if angle_control_requested and not self.angle_control_ready and abs(CS.out.steeringAngleDeg) > max_angle:
+          self.angle_control_recovery = True
+        lat_active = angle_control_requested and self.angle_control_ready and not self.angle_control_recovery
         apply_angle = actuators.steeringAngleDeg
         if lat_active:
           filter_rc = float(np.interp(CS.out.vEgoRaw, ANGLE_FILTER_SPEED_BP, ANGLE_FILTER_RC_V))
           self.angle_filter.update_alpha(filter_rc)
           apply_angle = self.angle_filter.update(apply_angle)
-        else:
-          # Avoid a stale filtered target when control resumes after an
-          # ordinary disengagement or a driver steering override.
+        apply_angle = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
+                                                CS.out.steeringAngleDeg, lat_active, CarControllerParams, self.VM)
+        # A rising speed can put the previous command outside the acceleration
+        # envelope. Rate limiting alone cannot safely bring that baseline back:
+        # rejected active frames reset safety's baseline to the measured angle.
+        if lat_active and abs(apply_angle) > max_angle:
+          self.angle_control_recovery = True
+          lat_active = False
+        if not lat_active:
+          # Track the wheel until a measured baseline is inside the envelope,
+          # including engagement, driver override and recovery after a speed rise.
           self.angle_filter.x = CS.out.steeringAngleDeg
-
-        self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
-                                                            CS.out.steeringAngleDeg, lat_active, CarControllerParams, self.VM)
+          apply_angle = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
+                                                  CS.out.steeringAngleDeg, False, CarControllerParams, self.VM)
+        # Only gate arming on measured angle. Once active, check the command so
+        # measurement noise around the bound does not repeatedly cut steering.
+        self.angle_control_ready = angle_control_requested and (lat_active or abs(CS.out.steeringAngleDeg) <= max_angle)
+        self.apply_angle_last = apply_angle
         can_sends.append(subarucan.create_steering_control_angle(self.packer, self.apply_angle_last, lat_active))
       else:
         apply_torque = int(round(actuators.torque * self.p.STEER_MAX))
