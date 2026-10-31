@@ -1,0 +1,21 @@
+{
+  "description": "Rounded numeric observations from two audited highway clipping windows. Tests repeat each snapshot at synthetic timestamps; these are diagnostic cases, not recorded CAN replay or physical calibration ground truth.",
+  "cases": [
+    {
+      "speed": 34.659,
+      "desired_angle": -14.220,
+      "output_angle": -10.426,
+      "measured_angle": -10.380,
+      "steer_ratio": 17.306,
+      "stiffness_factor": 0.9369
+    },
+    {
+      "speed": 28.745,
+      "desired_angle": -16.945,
+      "output_angle": -13.113,
+      "measured_angle": -13.110,
+      "steer_ratio": 17.422,
+      "stiffness_factor": 0.9325
+    }
+  ]
+}

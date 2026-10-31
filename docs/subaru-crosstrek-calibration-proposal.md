@@ -6,6 +6,82 @@ Passing synthetic tests establishes software consistency, not road safety or cor
 vehicle response. This proposal does not fix the separately investigated engagement
 state/synchronization issue.
 
+## Reproduce the model and clipping diagnostic
+
+`opendbc.car.subaru.calibration_audit` examines local logs without changing the
+controller, firmware, calibration, or safety limits. Run it in the matching
+openpilot Python environment, with this opendbc checkout installed or on
+`PYTHONPATH`:
+
+```bash
+python -m opendbc.car.subaru.calibration_audit \
+  /path/to/route/63/rlog.zst /path/to/route/66/rlog.zst > calibration-report.json
+```
+
+Supply files in chronological order. The CLI does not download logs. The full
+openpilot log reader is required because opendbc's minimal CAN schema does not
+expose `carState`, `carControl`, `carOutput`, and `vehicleParameters`. The reported
+times are seconds from the earliest event in the first supplied file; when the
+file contains the route's original `initData`, these are route-relative times.
+Recorded CarParams must select the Crosstrek angle model and match this checkout's
+ratio, geometry, and normalized tire stiffness. Use the matching revisions when
+auditing an older or newer drive.
+
+The report separates two observations:
+
+- **Model disagreement:** compare the learned and fixed model's steering-angle
+  gain at the same speed, zero roll and zero angle offset. A difference above 10%
+  lasting at least 0.5 seconds is a diagnostic trigger. The learned ratio is an
+  estimator result, not independent physical ground truth.
+- **Fixed-limit clipping:** the requested angle is more than 0.25 degrees outside
+  the fixed model's angle bound while the controller output is within 0.25 degrees
+  of that bound, with the same sign, for at least 0.5 seconds. Report the
+  desired-to-output gap separately from output-to-measured tracking error. A large
+  requested angle alone, or an output still far from the bound, does not establish
+  fixed-angle clipping.
+
+These thresholds select evidence for review; they are not physical acceptance
+criteria. Only active lateral control without driver override, valid CAN and
+learned parameters, speed of at least 10 m/s, and dynamic signals no older than 150 ms are
+eligible. Slowly learned `vehicleParameters` may be up to 350 ms old to accommodate
+their 4 Hz qlog sampling; dynamic signals and output gaps retain the 150 ms limit.
+The tool joins preceding signals at each output timestamp. Missing,
+invalid, stale, or override samples break persistent intervals; absent segments
+are never counted as continuous evidence. At least one continuous eligible second
+is required; adding many short, disconnected fragments cannot pass the coverage
+check. The low-speed filter is out of scope.
+Tracking error is a contemporaneous comparison, not an identified actuator delay.
+
+The CLI exits **1** for `needs_review`, **2** for insufficient eligible data or
+invalid input, and **0** for `no_diagnostic_trigger`. No result certifies a
+physical calibration or road safety. Qlogs can be used for this sampled diagnostic;
+full-rate rlogs are needed to replay CAN/safety and inspect transition timing.
+
+On the audited 0.11.2/`510e9a6d8` drive with opendbc `df8411ee`, full-rate segments
+63 and 66 supply 111.83 eligible seconds. The learned-to-fixed gain median is
+1.37185. Persistent fixed-limit clipping appears at 3790.515–3791.928 seconds and
+3977.606–3979.486 seconds. At the largest clipped gap, the desired-to-output
+difference is 5.120 degrees while output-to-measured error is 0.023 degrees.
+This supports investigating the model/limit interaction; it does not establish
+that increasing the fixed ratio or safety envelope would be physically correct.
+Segments 33–35 provide an additional comparison around the earlier bookmark.
+The same two qlog segments also trigger review and retain both clipping windows
+(1.20 and 1.80 seconds at the lower sample rate), with 111.30 eligible seconds.
+
+The committed numerical fixture contains rounded observations from the two
+clipping windows, repeated at synthetic timestamps in tests. It includes no raw
+route, location, VIN, video, or CAN capture. It checks that the diagnostic detects
+this combination of clipping and close actuator tracking, while rejecting stale,
+invalid, brief, or driver-override evidence. It is not a replacement for a retained
+full-rate route fixture or controller-to-safety replay.
+
+Before changing calibration, collect independent steering-angle/unit/ratio
+evidence for this trim and EPS, validate the learned model's offset, stiffness and
+roll assumptions, and reproduce tracking across speeds and both turn directions.
+Any accepted model change must update Python and embedded safety together and
+pass full-rate replay. One drive's estimated ratio is insufficient justification
+to expand steering authority.
+
 ## Provenance and scope
 
 Candidate adapted from [jacobwaller/opendbc at 753fdd3](https://github.com/jacobwaller/opendbc/tree/753fdd383a18c3f9e86af801f1e0e9db2a168e72),
