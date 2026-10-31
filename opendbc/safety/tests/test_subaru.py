@@ -332,11 +332,41 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
         self.safety.set_desired_angle_last(apply_angle_can * sign)
         self.assertTrue(self._tx(self._angle_cmd_msg(apply_angle_can / self.DEG_TO_CAN * sign, True)))
 
-        above_limit_can = min(max_angle_can + 1, self.STEER_ANGLE_MAX * self.DEG_TO_CAN)
+        # Probe beyond the tighter of the model and absolute limits. Clipping
+        # this candidate to STEER_ANGLE_MAX would never exercise its boundary.
+        above_limit_can = apply_angle_can + 1
         self.safety.set_desired_angle_last(above_limit_can * sign)
+        self.assertFalse(self._tx(self._angle_cmd_msg(above_limit_can / self.DEG_TO_CAN * sign, True)))
 
-        should_tx = max_angle_can >= self.STEER_ANGLE_MAX * self.DEG_TO_CAN
-        self.assertEqual(should_tx, self._tx(self._angle_cmd_msg(above_limit_can / self.DEG_TO_CAN * sign, True)))
+  def test_absolute_angle_limit_ramp(self):
+    # A sequence within the low-speed rate limit must still stop at the
+    # absolute EPS limit, even when the model allows a larger steering angle.
+    for sign in (-1, 1):
+      with self.subTest(sign=sign):
+        self._reset_angle_safety()
+        self._reset_speed_measurement(5)
+        self._reset_angle_measurement(0)
+        self.safety.set_controls_allowed(True)
+        for angle in range(0, self.STEER_ANGLE_MAX + 1, 5):
+          self.assertTrue(self._tx(self._angle_cmd_msg(sign * angle, True)))
+        measured_angle = sign * 20
+        self._reset_angle_measurement(measured_angle)
+        self.assertFalse(self._tx(self._angle_cmd_msg(sign * (self.STEER_ANGLE_MAX + 1 / self.DEG_TO_CAN), True)))
+        # Resume from the latest measurement, not the rejected command or zero.
+        self.assertTrue(self._tx(self._angle_cmd_msg(measured_angle, True)))
+
+  def test_inactive_angle_absolute_limit(self):
+    # Inactive commands retain their measured-angle clamp and one CAN-unit
+    # tolerance, including when the driver has steered beyond the active cap.
+    for controls_allowed in (False, True):
+      for sign in (-1, 1):
+        with self.subTest(controls_allowed=controls_allowed, sign=sign):
+          self._reset_angle_safety()
+          self._reset_angle_measurement(sign * (self.STEER_ANGLE_MAX + 10))
+          self.safety.set_controls_allowed(controls_allowed)
+          for delta_can in (-2, -1, 0, 1, 2):
+            angle = sign * (self.STEER_ANGLE_MAX + delta_can / self.DEG_TO_CAN)
+            self.assertEqual(abs(delta_can) <= 1, self._tx(self._angle_cmd_msg(angle, False)))
 
   def test_lateral_jerk_limit(self):
     for speed in np.linspace(0, 40, 100):

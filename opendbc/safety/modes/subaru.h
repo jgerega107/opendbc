@@ -178,6 +178,12 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     bool lkas_request = GET_BIT(msg, 12U);
 
     violation |= steer_angle_cmd_checks_vm(desired_angle, lkas_request, SUBARU_ANGLE_STEERING_LIMITS, SUBARU_STEERING_PARAMS);
+    // The VM limit exceeds the EPS angle limit at low speeds. Keep this check
+    // local to Subaru, and reset the baseline just like other angle violations.
+    if (lkas_request && safety_max_limit_check(desired_angle, SUBARU_ANGLE_STEERING_LIMITS.max_angle, -SUBARU_ANGLE_STEERING_LIMITS.max_angle)) {
+      violation = true;
+      desired_angle_last = SAFETY_CLAMP(angle_meas.values[0], -SUBARU_ANGLE_STEERING_LIMITS.max_angle, SUBARU_ANGLE_STEERING_LIMITS.max_angle);
+    }
   }
 
   // torque steer cmd checks
